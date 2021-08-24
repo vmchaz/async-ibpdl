@@ -1,26 +1,23 @@
-import html
 from html.parser import HTMLParser
 from urllib import request
-import sys
 import tarfile
 import time
 from io import BytesIO
-
-import aiohttp
-import asyncio
-
-import hashlib
+import argparse
+from logger import logging
 
 from asyncworkers import DownloadTask, TaskList, async_worker, run_download_loop
 
 
+def handler_proc(address, local_name, data, worker_num, handler_arg):
+    if local_name.startswith("mak") and local_name.endswith(".css"):
+        local_name = "mk.css"
 
-def handler_proc(ldict, handler_arg):
     tf = handler_arg
     
-    fb = BytesIO(ldict["data"])
-    ti = tarfile.TarInfo(name=ldict["local_name"])
-    ti.size = len(ldict["data"])
+    fb = BytesIO(data)
+    ti = tarfile.TarInfo(name=local_name)
+    ti.size = len(data)
     ti.mtime = time.time()
     tf.addfile(tarinfo=ti, fileobj=fb)
     
@@ -40,15 +37,9 @@ class MyHTMLParserB1(HTMLParser):
 
 
     def handle_starttag(self, tag, attrs):
-    
-        
-        
         attrs_dict = {}
         for attr in attrs:
             attrs_dict[attr[0]] = attr[1]
-                
-        #if hashlib.md5(tag.encode).hexdigest().startswith("d5"):
-        #    pass
         
         if (tag == "figure") and attrs_dict.get("class") == "post__image":
             self.in_image_block = True
@@ -76,54 +67,33 @@ class MyHTMLParserB1(HTMLParser):
                 self.in_preview_link = True
                 
                 h2 = attrs_dict["href"].lower()
-                #if h.startswith("//"):
-                #    h = h[2:]
-                #h = "https://" + self.site_address + h
-                #h2 = h.lower()
                 if h2.endswith(".png") or h2.endswith(".jpg") or h2.endswith(".jpeg") or h2.endswith(".webm") or h2.endswith(".mp4"):
                     if h2 not in self.addresses:
                         self.addresses.append(h2)
-                        
-                    #if h not in self.imgs:
-                    #    self.imgs.append(h)
+
 
     def handle_endtag(self, tag):
         if tag == "a":
             if self.in_preview_link:
                 self.in_preview_link = False
-        if tag == "figure":
+
+        elif tag == "figure":
             if self.in_preview_link:
                 self.in_preview_link = False                
             self.in_figure = False
-        if tag == "figcaption":
+
+        elif tag == "figcaption":
             self.in_figcaption = False
-        pass
-        #print("Encountered an end tag :", tag)
+
 
     def handle_data(self, data):
         pass
-        #print("Encountered some data  :", data)
-        
-def process_addresses_b1(addresses, protocol, site):
-    addresses_f = []
-    for a in addresses:
-        a2 = a
-        mc = False
-        
-        if a2.startswith("//") and (not mc):
-            a2 = f"{protocol}:{a2}"
-            mc = True
-            
-        if (len(a2) >= 2) and (a2[0] == "/") and (a2[1] != "/") and (not mc):
-            a2 = f"{protocol}://{site}{a2}"
-            mc = True
-        
-        addresses_f.append(a2)
-        
-    return addresses_f
-        
         
 
+
+def process_addresses_b1(addresses, protocol, site):
+    return [f"{protocol}:{a}" for a in addresses if a.startswith("//")] \
+    + [f"{protocol}://{site}{a}" for a in addresses if (len(a) >= 2) and (a[0] == "/") and (a[1] != "/")]
 
 
 def split_address(a):
@@ -157,61 +127,45 @@ gFlags = {}
 gAddress = ""
 
 def main():
-    if len(sys.argv) < 2:
-        return
-        
-    addr = ""
-    
-    for a in sys.argv[1:]:
-        if a.startswith("--"):
-            arg_name = a[2:].split("=", 1)[0]
-            if "=" in a:            
-                gFlags[arg_name] = a[2:].split("=", 1)[1]
-            else:
-                gFlags[arg_name] = True
-        else:
-            if addr == "":
-                addr = a
-            else:
-                addr += " " + a
-        
-    imgs = []
-    imgdata = {}
-    htmldata = None
-    #print(addr)
-    #addr = sys.argv[1]
-    
+    argparser = argparse.ArgumentParser()
+    argparser.add_argument("address", type=str, help="Address of the thread to save")
+    argparser.add_argument("-n", "--noindex", action="store_true", help="dont save index.html")
+
+    args = argparser.parse_args()
+
+    gFlags["noindex"] = args.noindex
+    addr = args.address
     
     tasklist = TaskList()
-    
-    
     
     protocol, site_addr, board_name, page_addr = split_address(addr)
     
     parser = MyHTMLParserB1(tasklist, site_addr)
     
     if protocol == "http" or protocol == "https":
-        print("Getting page")
-        #print(dir(request))
+        logging.info("Getting page")
         with request.urlopen(addr) as r:
             htmldata = r.read().decode()
     else:
-        print("Unknown protocol")
+        logging.error("Unknown protocol")
         return
-        
     
     parser.feed(htmldata)
     
-    addresses_f = process_addresses_b1(parser.addresses, "https", "2ch.hk")
+    addresses_f = process_addresses_b1(parser.addresses, "https", site_addr)
     addresses_l = []
     htmldata2 = htmldata[:]
-    for r in parser.addresses:
-        r2 = r.split("/")[-1]
-        if r2 == "makaba.css":
-            r2 = "mk.css"
-        addresses_l.append((r, r2))
-        htmldata2 = htmldata2.replace(r, r2)
-        #print(r, r2)
+
+    #TODO: use only 1 local name list
+    #TODO: optimize replace
+
+    for full_address in parser.addresses:
+        local_address = r.split("/")[-1]
+        if local_address.startswith("mak") and local_address.endswith(".css"):
+            local_address = "mk.css"
+
+        addresses_l.append((full_address, local_address))
+        htmldata2 = htmldata2.replace(full_address, local_address)
         
         
     tarfn =  f"{site_addr} - {board_name} - {page_addr}.tar"
@@ -225,21 +179,20 @@ def main():
         ti.mtime = time.time()
         tar.addfile(tarinfo=ti, fileobj=fb)
         
-        hde2 = htmldata2.encode("utf8")
-        fb = BytesIO(hde2)
+        htmldata_encoded = htmldata2.encode("utf8")
+        fb = BytesIO(htmldata_encoded)
         ti = tarfile.TarInfo(name="index.html")
-        ti.size = len(hde2)
+        ti.size = len(htmldata_encoded)
         ti.mtime = time.time()
         tar.addfile(tarinfo=ti, fileobj=fb)
-
 
     for a in addresses_f:
         tasklist.add_task(DownloadTask(a))
     
-    run_download_loop(2, handler_proc, tar)
+    run_download_loop(2, tasklist, handler_proc, tar)
     
     tar.close()
-    print("Saved to", tarfn)
+    logging.info("Saved to", tarfn)
 
 if __name__ == "__main__":
     main()
