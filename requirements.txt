@@ -1,1 +1,2 @@
-aiohttp
+aiohttp==3.7.4.post0
+logger==1.4
